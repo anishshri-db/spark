@@ -21,17 +21,14 @@ import java.io._
 import java.util
 import java.util.Locale
 import java.util.concurrent.atomic.LongAdder
-
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.util.control.NonFatal
-
 import com.google.common.io.ByteStreams
 import org.apache.commons.io.IOUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs._
-
-import org.apache.spark.{SparkConf, SparkEnv}
+import org.apache.spark.{SparkConf, SparkEnv, SparkUnsupportedOperationException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
@@ -119,8 +116,10 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
     override def id: StateStoreId = HDFSBackedStateStoreProvider.this.stateStoreId
 
     override def createColFamilyIfAbsent(colFamilyName: String): Unit = {
-      throw new UnsupportedOperationException("Creating multiple column families with " +
-        "HDFSBackedStateStoreProvider is not supported")
+      throw new SparkUnsupportedOperationException(
+        errorClass = "MULTIPLE_COLUMN_FAMILIES_NOT_SUPPORTED",
+        messageParameters = Map("stateStoreProvider" -> "HDFSBackedStateStoreProvider")
+      )
     }
 
     override def get(key: UnsafeRow, colFamilyName: String): UnsafeRow = {
@@ -270,8 +269,10 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
 
     // TODO: add support for multiple col families with HDFSBackedStateStoreProvider
     if (useColumnFamilies) {
-      throw new UnsupportedOperationException("Multiple column families are not supported with " +
-        s"HDFSBackedStateStoreProvider")
+      throw new SparkUnsupportedOperationException(
+        errorClass = "MULTIPLE_COLUMN_FAMILIES_NOT_SUPPORTED",
+        messageParameters = Map("stateStoreProvider" -> "HDFSBackedStateStoreProvider")
+      )
     }
 
     require((keySchema.length == 0 && numColsPrefixKey == 0) ||

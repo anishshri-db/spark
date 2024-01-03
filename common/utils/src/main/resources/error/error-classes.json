@@ -480,6 +480,18 @@
     ],
     "sqlState" : "42711"
   },
+  "COLUMN_FAMILY_DOES_NOT_EXIST" : {
+    "message" : [
+      "Column family with name <columnFamilyName> does not exist."
+    ],
+    "sqlState" : "00000"
+  },
+  "COLUMN_FAMILY_RESERVED" : {
+    "message" : [
+      "Failed to create column family with reserved name <columnFamilyName>."
+    ],
+    "sqlState" : "00000"
+  },
   "COLUMN_NOT_DEFINED_IN_TABLE" : {
     "message" : [
       "<colType> column <colName> is not defined in table <tableName>, defined table columns are: <tableCols>."
@@ -1326,6 +1338,12 @@
       "<identifier> is not a valid identifier as it has more than 2 name parts."
     ],
     "sqlState" : "42601"
+  },
+  "IMPLICIT_KEY_NOT_FOUND" : {
+    "message" : [
+      "Implicit key not found for operation on stateName = <stateName>."
+    ],
+    "sqlState" : "00000"
   },
   "INCOMPARABLE_PIVOT_COLUMN" : {
     "message" : [
@@ -2648,6 +2666,12 @@
       "The query does not include a GROUP BY clause. Add GROUP BY or turn it into the window functions using OVER clauses."
     ],
     "sqlState" : "42803"
+  },
+  "MULTIPLE_COLUMN_FAMILIES_NOT_SUPPORTED" : {
+    "message" : [
+      "Creating multiple column families with <stateStoreProvider> is not supported."
+    ],
+    "sqlState" : "00000"
   },
   "MULTIPLE_TIME_TRAVEL_SPEC" : {
     "message" : [
@@ -4130,6 +4154,12 @@
       "The `raise_error()` function was used to raise an unknown error class: <errorClass>"
     ],
     "sqlState" : "P0001"
+  },
+  "VALUE_STATE_MULTIPLE_VALUES_PER_KEY" : {
+    "message": [
+      "Store does not support multiple values per key."
+    ],
+    "sqlState" : "00000"
   },
   "VARIABLE_ALREADY_EXISTS" : {
     "message" : [

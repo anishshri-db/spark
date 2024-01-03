@@ -18,7 +18,7 @@
 package org.apache.spark.sql.execution.streaming
 
 import org.apache.commons.lang3.SerializationUtils
-
+import org.apache.spark.SparkUnsupportedOperationException
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{UnsafeProjection, UnsafeRow}
 import org.apache.spark.sql.types.{BinaryType, StructType}
@@ -30,8 +30,10 @@ object StateEncoder {
   def encodeKey(stateName: String): UnsafeRow = {
     val keyOption = ImplicitKeyTracker.getImplicitKeyOption
     if (keyOption.isEmpty) {
-      throw new UnsupportedOperationException("Implicit key not found for operation on" +
-        s"stateName=$stateName")
+      throw new SparkUnsupportedOperationException(
+        errorClass = "IMPLICIT_KEY_NOT_FOUND",
+        messageParameters = Map("stateName" -> stateName)
+      )
     }
 
     val schemaForKeyRow: StructType = new StructType().add("key", BinaryType)

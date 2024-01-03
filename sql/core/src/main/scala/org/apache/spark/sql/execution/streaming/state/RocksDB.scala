@@ -20,20 +20,17 @@ package org.apache.spark.sql.execution.streaming.state
 import java.io.File
 import java.util.Locale
 import javax.annotation.concurrent.GuardedBy
-
-import scala.collection.{mutable, Map}
+import scala.collection.{Map, mutable, immutable => im}
 import scala.jdk.CollectionConverters._
 import scala.ref.WeakReference
 import scala.util.Try
-
 import org.apache.hadoop.conf.Configuration
 import org.json4s.{Formats, NoTypeHints}
 import org.json4s.jackson.Serialization
 import org.rocksdb.{RocksDB => NativeRocksDB, _}
 import org.rocksdb.CompressionType._
 import org.rocksdb.TickerType._
-
-import org.apache.spark.TaskContext
+import org.apache.spark.{SparkRuntimeException, SparkUnsupportedOperationException, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.errors.QueryExecutionErrors
@@ -244,8 +241,10 @@ class RocksDB(
    */
   def createColFamilyIfAbsent(colFamilyName: String): Unit = {
     if (colFamilyName == StateStore.DEFAULT_COL_FAMILY_NAME) {
-      throw new UnsupportedOperationException("Failed to create column family with reserved " +
-        s"name=$colFamilyName")
+      throw new SparkUnsupportedOperationException(
+        errorClass = "COLUMN_FAMILY_RESERVED",
+        messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+      )
     }
 
     if (!checkColFamilyExists(colFamilyName)) {
@@ -266,7 +265,10 @@ class RocksDB(
     if (useColumnFamilies) {
       // if col family is not created, throw an exception
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
       db.get(colFamilyNameToHandleMap(colFamilyName), readOptions, key)
     } else {
@@ -285,7 +287,10 @@ class RocksDB(
     if (useColumnFamilies) {
       // if col family is not created, throw an exception
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
 
       if (conf.trackTotalNumberOfRows) {
@@ -312,7 +317,10 @@ class RocksDB(
             colFamilyName: String = StateStore.DEFAULT_COL_FAMILY_NAME): Unit = {
     if (useColumnFamilies) {
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
 
       if (conf.trackTotalNumberOfRows) {
@@ -345,7 +353,10 @@ class RocksDB(
     if (useColumnFamilies) {
       // if col family is not created, throw an exception
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
 
       if (conf.trackTotalNumberOfRows) {
@@ -376,7 +387,10 @@ class RocksDB(
     val iter = if (useColumnFamilies) {
       // if col family is not created, throw an exception
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
 
       db.newIterator(colFamilyNameToHandleMap(colFamilyName))
@@ -412,7 +426,10 @@ class RocksDB(
     val iter = if (useColumnFamilies) {
       // if col family is not created, throw an exception
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
 
       db.newIterator(colFamilyNameToHandleMap(colFamilyName))
@@ -442,7 +459,10 @@ class RocksDB(
     val iter = if (useColumnFamilies) {
       // if col family is not created, throw an exception
       if (!checkColFamilyExists(colFamilyName)) {
-        throw new RuntimeException(s"Column family with name=$colFamilyName does not exist")
+        throw new SparkRuntimeException(
+          errorClass = "COLUMN_FAMILY_DOES_NOT_EXIST",
+          messageParameters = im.Map("columnFamilyName" -> colFamilyName)
+        )
       }
 
       db.newIterator(colFamilyNameToHandleMap(colFamilyName))
