@@ -159,4 +159,14 @@ class TransformWithStateValidationSuite extends StateStoreMetricsTest {
       }
     )
   }
+
+  test("transformWithState - batch") {
+    // Use transformWithState in batch query
+    val df = Seq("a", "a", "b").toDS()
+      .groupByKey(x => x)
+      .transformWithState(new RunningCountStatefulProcessor,
+        TimeoutMode.NoTimeouts(),
+        OutputMode.Append()).toDF()
+    checkAnswer(df, Seq(("a", "2"), ("b", "1")).toDF())
+  }
 }
