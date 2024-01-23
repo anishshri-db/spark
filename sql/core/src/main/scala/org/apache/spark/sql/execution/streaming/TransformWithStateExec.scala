@@ -21,11 +21,12 @@ import java.util.concurrent.TimeUnit.NANOSECONDS
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Ascending, Attribute, Expression, SortOrder, UnsafeRow}
+import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, LogicalGroupState}
 import org.apache.spark.sql.catalyst.plans.physical.Distribution
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper.StateStoreAwareZipPartitionsHelper
 import org.apache.spark.sql.execution.streaming.state._
-import org.apache.spark.sql.streaming.{OutputMode, StatefulProcessor, StatefulProcessorWithInitialState, TimeoutMode}
+import org.apache.spark.sql.streaming.{GroupStateTimeout, OutputMode, StatefulProcessor, StatefulProcessorWithInitialState, TimeoutMode}
 import org.apache.spark.sql.types._
 import org.apache.spark.util.{CompletionIterator, SerializableConfiguration}
 
@@ -117,13 +118,13 @@ case class TransformWithStateExec(
     val getOutputRow = ObjectOperator.wrapObjectToRow(outputObjectType)
 
     val keyObj = getKeyObj(keyRow)  // convert key to objects
-    ImplicitKeyTracker.setImplicitKey(keyObj)
+    ImplicitGroupingKeyTracker.setImplicitKey(keyObj)
     val valueObjIter = valueRowIter.map(getValueObj.apply)
     val mappedIterator = statefulProcessor.handleInputRows(keyObj, valueObjIter,
       new TimerValuesImpl(batchTimestampMs, eventTimeWatermarkForLateEvents)).map { obj =>
         getOutputRow(obj)
     }
-    ImplicitKeyTracker.removeImplicitKey()
+    ImplicitGroupingKeyTracker.removeImplicitKey()
     mappedIterator
   }
 
@@ -290,6 +291,79 @@ case class TransformWithStateExec(
           val result = processDataWithPartition(singleIterator, store, processorHandle)
           result
       }
+    }
+  }
+}
+
+object TransformWithStateExec {
+
+  def foundDuplicateInitialKeyException(): Exception = {
+    throw new IllegalArgumentException("The initial state provided contained " +
+      "multiple rows(state) with the same key. Make sure to de-duplicate the " +
+      "initial state before passing it.")
+  }
+
+  /**
+   * Plan logical flatmapGroupsWIthState for batch queries
+   * If the initial state is provided, we create an instance of the CoGroupExec, if the initial
+   * state is not provided we create an instance of the MapGroupsExec
+   */
+  // scalastyle:off argcount
+  def generateSparkPlanForBatchQueries(
+      statefulProcessor: StatefulProcessor[Any, Any, Any],
+      keyDeserializer: Expression,
+      valueDeserializer: Expression,
+      initialStateDeserializer: Expression,
+      groupingAttributes: Seq[Attribute],
+      initialStateGroupAttrs: Seq[Attribute],
+      dataAttributes: Seq[Attribute],
+      initialStateDataAttrs: Seq[Attribute],
+      outputObjAttr: Attribute,
+      timeoutMode: TimeoutMode,
+      hasInitialState: Boolean,
+      initialState: SparkPlan,
+      child: SparkPlan): SparkPlan = {
+    // how to deal with initial state?
+    if (hasInitialState) {
+      val watermarkPresent = child.output.exists {
+        case a: Attribute if a.metadata.contains(EventTimeWatermark.delayKey) => true
+        case _ => false
+      }
+      val func = (keyRow: Any, values: Iterator[Any], states: Iterator[Any]) => {
+        // Check if there is only one state for every key.
+        var foundInitialStateForKey = false
+        val optionalStates = states.map { stateValue =>
+          if (foundInitialStateForKey) {
+            foundDuplicateInitialKeyException()
+          }
+          foundInitialStateForKey = true
+          stateValue
+        }.toArray
+
+        // Create group state object
+        val groupState = GroupStateImpl.createForStreaming(
+          optionalStates.headOption,
+          System.currentTimeMillis,
+          GroupStateImpl.NO_TIMESTAMP,
+          GroupStateTimeout.NoTimeout(),
+          hasTimedOut = false,
+          watermarkPresent)
+
+         val currentTimestampMs = Some(groupState.getCurrentProcessingTimeMs())
+         val currentWatermarkMs = Some(groupState.getCurrentWatermarkMs())
+        // Call user function with the state and values for this key
+        statefulProcessor.handleInputRows(keyRow, values,
+          new TimerValuesImpl(currentTimestampMs, currentWatermarkMs))
+      }
+      CoGroupExec(
+        func, keyDeserializer, valueDeserializer, initialStateDeserializer, groupingAttributes,
+        initialStateGroupAttrs, dataAttributes, initialStateDataAttrs, Seq.empty, Seq.empty,
+        outputObjAttr, child, initialState)
+    } else {
+      // what to pass in to MapGroupsExec?
+      MapGroupsExec(
+        statefulProcessor.handleInputRows, keyDeserializer, valueDeserializer, groupingAttributes,
+        dataAttributes, Seq.empty, outputObjAttr, GroupStateTimeout.NoTimeout(), child)
     }
   }
 }
