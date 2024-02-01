@@ -124,14 +124,12 @@ class TransformWithStateSuite extends StateStoreMetricsTest
         CheckNewAnswer(("a", "1")),
         AddData(inputData2, "a", "b"),
         CheckNewAnswer(("a", "2"), ("b", "1")),
-        StopStream,
-        StartStream(),
         AddData(inputData1, "a", "b"), // should remove state for "a" and not return anything for a
         CheckNewAnswer(("b", "2")),
-        StopStream,
-        StartStream(),
-        AddData(inputData2, "a", "c"), // should recreate state for "a" and return count as 1 and
-        CheckNewAnswer(("a", "1"), ("c", "1"))
+        AddData(inputData1, "d", "e"),
+        AddData(inputData2, "a", "c"), // should recreate state for "a" and return count as 1
+        CheckNewAnswer(("a", "1"), ("c", "1"), ("d", "1"), ("e", "1")),
+        StopStream
       )
     }
   }
