@@ -18,9 +18,12 @@
 package org.apache.spark.sql.streaming
 
 import org.apache.spark.SparkIllegalArgumentException
-import org.apache.spark.sql.Encoders
+import org.apache.spark.internal.Logging
+import org.apache.spark.sql.{Encoders, Row}
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions
 import org.apache.spark.sql.execution.streaming.MemoryStream
 import org.apache.spark.sql.execution.streaming.state.{AlsoTestWithChangelogCheckpointingEnabled, RocksDBStateStoreProvider}
+import org.apache.spark.sql.functions.explode
 import org.apache.spark.sql.internal.SQLConf
 
 case class InputRow(key: String, action: String, value: String)
@@ -124,6 +127,39 @@ class ToggleSaveAndEmitProcessor
         }
       }
     }
+  }
+}
+
+class StatefulProcessorWithSingleListState extends
+  StatefulProcessor[String, (String, String), String] with Logging {
+  @transient private var _listState: ListState[String] = _
+  @transient private var _tempState: ListState[Int] = _
+
+  override def init(
+      outputMode: OutputMode,
+      timeMode: TimeMode): Unit = {
+    _listState = getHandle.getListState("testListState", Encoders.STRING)
+    _tempState = getHandle.getListState("tempState", Encoders.scalaInt)
+  }
+
+  override def handleInputRows(
+      key: String,
+      inputRows: Iterator[(String, String)],
+      timerValues: TimerValues,
+      expiredTimerInfo: ExpiredTimerInfo): Iterator[String] = {
+    logWarning(s"TEST: processing key=$key")
+    inputRows.foreach { inputRow =>
+      logWarning(s"TEST: Adding value=${inputRow._2} for key=$key")
+      _listState.appendValue(inputRow._2)
+      _tempState.appendValue(inputRow._2.size)
+    }
+
+    _listState.get().foreach { item =>
+      logWarning(s"TEST: current content of list=$item")
+    }
+    logWarning(s"TEST: done processing key=$key")
+
+    Iterator.empty
   }
 }
 
@@ -325,6 +361,73 @@ class TransformWithListStateSuite extends StreamTest
         AddData(inputData, "k2"),
         CheckNewAnswer("k1", "k1", "k2", "k2")
       )
+    }
+  }
+
+  test("test data source integration") {
+    withTempDir { tempDir =>
+      withSQLConf(SQLConf.STATE_STORE_PROVIDER_CLASS.key ->
+        classOf[RocksDBStateStoreProvider].getName) {
+
+        val inputData = MemoryStream[(String, String)]
+        val result = inputData.toDS()
+          .groupByKey(x => x._1)
+          .transformWithState(new StatefulProcessorWithSingleListState(),
+            TimeMode.None(),
+            OutputMode.Update())
+
+        testStream(result, OutputMode.Update())(
+          StartStream(checkpointLocation = tempDir.getAbsolutePath),
+          AddData(inputData, ("k1", "v1")),
+          AddData(inputData, ("k1", "v400")),
+//          AddData(inputData, ("k2", "v2")),
+//          CheckNewAnswer(),
+          AddData(inputData, ("k1", "v20")),
+          AddData(inputData, ("k1", "v609024")),
+          AddData(inputData, ("k1", "x")),
+  //        CheckNewAnswer(),
+  //        AddData(inputData, ("k3", "v6")),
+   //        AddData(inputData, ("k3", "v7")),
+          CheckNewAnswer(),
+          StopStream
+        )
+
+        val stateReaderDf = spark.read
+          .format("statestore")
+          .option(StateSourceOptions.PATH, tempDir.getAbsolutePath)
+          .option(StateSourceOptions.STATE_VAR_NAME, "tempState")
+          .load()
+
+        val listStateDf = stateReaderDf
+          .selectExpr(
+      "key.value AS groupingKey",
+            "value_list.value AS valueList",
+            "partition_id")
+          .select($"groupingKey",
+            explode($"valueList"))
+
+        checkAnswer(listStateDf,
+          Seq(Row("k1", 1), Row("k1", 2), Row("k1", 3),
+            Row("k1", 4), Row("k1", 7)))
+
+        val stateReaderDf1 = spark.read
+          .format("statestore")
+          .option(StateSourceOptions.PATH, tempDir.getAbsolutePath)
+          .option(StateSourceOptions.STATE_VAR_NAME, "testListState")
+          .load()
+
+        val listStrStateDf = stateReaderDf1
+          .selectExpr(
+      "key.value AS groupingKey",
+            "value_list.value AS valueList",
+            "partition_id")
+          .select($"groupingKey",
+            explode($"valueList"))
+
+        checkAnswer(listStrStateDf,
+          Seq(Row("k1", "v1"), Row("k1", "v20"), Row("k1", "v400"),
+            Row("k1", "v609024"), Row("k1", "x")))
+      }
     }
   }
 }

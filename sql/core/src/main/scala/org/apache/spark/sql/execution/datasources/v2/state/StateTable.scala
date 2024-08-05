@@ -23,10 +23,11 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.{MetadataColumn, SupportsMetadataColumns, SupportsRead, Table, TableCapability}
 import org.apache.spark.sql.connector.read.ScanBuilder
-import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.JoinSideValues
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.{JoinSideValues, StateVarType}
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.StateVarType.StateVarType
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
 import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, StateStoreConf}
-import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructType}
+import org.apache.spark.sql.types.{ArrayType, IntegerType, LongType, MapType, StringType, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.util.ArrayImplicits._
 
@@ -36,7 +37,8 @@ class StateTable(
     override val schema: StructType,
     sourceOptions: StateSourceOptions,
     stateConf: StateStoreConf,
-    keyStateEncoderSpec: KeyStateEncoderSpec)
+    keyStateEncoderSpec: KeyStateEncoderSpec,
+    stateVarType: StateVarType)
   extends Table with SupportsRead with SupportsMetadataColumns {
 
   import StateTable._
@@ -76,7 +78,8 @@ class StateTable(
   override def capabilities(): util.Set[TableCapability] = CAPABILITY
 
   override def newScanBuilder(options: CaseInsensitiveStringMap): ScanBuilder =
-    new StateScanBuilder(session, schema, sourceOptions, stateConf, keyStateEncoderSpec)
+    new StateScanBuilder(session, schema, sourceOptions, stateConf, keyStateEncoderSpec,
+      stateVarType)
 
   override def properties(): util.Map[String, String] = Map.empty[String, String].asJava
 
@@ -84,6 +87,10 @@ class StateTable(
     val expectedFieldNames =
       if (sourceOptions.readChangeFeed) {
         Seq("batch_id", "change_type", "key", "value", "partition_id")
+      } else if (stateVarType == StateVarType.listType) {
+        Seq("key", "value", "value_list", "partition_id")
+      } else if (stateVarType == StateVarType.mapType) {
+        Seq("key", "value", "value_map", "partition_id")
       } else {
         Seq("key", "value", "partition_id")
       }
@@ -92,6 +99,8 @@ class StateTable(
       "change_type" -> classOf[StringType],
       "key" -> classOf[StructType],
       "value" -> classOf[StructType],
+      "value_list" -> classOf[ArrayType],
+      "value_map" -> classOf[MapType],
       "partition_id" -> classOf[IntegerType])
 
     if (schema.fieldNames.toImmutableArraySeq != expectedFieldNames) {
