@@ -29,16 +29,16 @@ import org.apache.spark.sql.{RuntimeConfig, SparkSession}
 import org.apache.spark.sql.catalyst.DataSourceOptions
 import org.apache.spark.sql.connector.catalog.{Table, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
-import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.{JoinSideValues, STATE_VAR_NAME}
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.{JoinSideValues, STATE_VAR_NAME, StateVarType}
 import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.JoinSideValues.JoinSideValues
 import org.apache.spark.sql.execution.datasources.v2.state.metadata.{StateMetadataPartitionReader, StateMetadataTableEntry}
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
-import org.apache.spark.sql.execution.streaming.{CommitLog, OffsetSeqLog, OffsetSeqMetadata, TransformWithStateOperatorProperties}
+import org.apache.spark.sql.execution.streaming.{CommitLog, OffsetSeqLog, OffsetSeqMetadata, StateVariableType, TransformWithStateOperatorProperties}
 import org.apache.spark.sql.execution.streaming.StreamingCheckpointConstants.{DIR_NAME_COMMITS, DIR_NAME_OFFSETS, DIR_NAME_STATE}
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper.{LeftSide, RightSide}
 import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, NoPrefixKeyStateEncoderSpec, PrefixKeyScanStateEncoderSpec, StateSchemaCompatibilityChecker, StateStore, StateStoreColFamilySchema, StateStoreConf, StateStoreId, StateStoreProviderId}
 import org.apache.spark.sql.sources.DataSourceRegister
-import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructType}
+import org.apache.spark.sql.types.{ArrayType, IntegerType, LongType, MapType, StringType, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.util.SerializableConfiguration
 
@@ -57,6 +57,8 @@ class StateDataSource extends TableProvider with DataSourceRegister with Logging
   private var stateStoreMetadata: Option[Array[StateMetadataTableEntry]] = None
 
   private var keyStateEncoderSpecOpt: Option[KeyStateEncoderSpec] = None
+
+  private var stateVarType = StateVarType.valueType
 
   private def runStateVarChecks(
       sourceOptions: StateSourceOptions,
@@ -135,7 +137,7 @@ class StateDataSource extends TableProvider with DataSourceRegister with Logging
       NoPrefixKeyStateEncoderSpec(keySchema)
     }
 
-    new StateTable(session, schema, sourceOptions, stateConf, keyStateEncoderSpec)
+    new StateTable(session, schema, sourceOptions, stateConf, keyStateEncoderSpec, stateVarType)
   }
 
   private def getKeyStateEncoderSpec(colFamilySchema: StateStoreColFamilySchema):
@@ -180,6 +182,7 @@ class StateDataSource extends TableProvider with DataSourceRegister with Logging
 
     val stateCheckpointLocation = sourceOptions.stateCheckpointLocation
     try {
+      var userKeySchema: Option[StructType] = None
       val (keySchema, valueSchema) = sourceOptions.joinSide match {
         case JoinSideValues.left =>
           StreamStreamJoinStateHelper.readKeyValueSchema(session, stateCheckpointLocation.toString,
@@ -195,9 +198,27 @@ class StateDataSource extends TableProvider with DataSourceRegister with Logging
           val providerId = new StateStoreProviderId(storeId, UUID.randomUUID())
           val storeMetadata = stateStoreMetadata.get
 
+          val stateVarName = sourceOptions.stateVarName
+            .getOrElse(StateStore.DEFAULT_COL_FAMILY_NAME)
+
           // Read the schema file path from operator metadata version v2 onwards
           val oldSchemaFilePath = if (storeMetadata.length > 0 && storeMetadata.head.version == 2) {
-            val schemaFilePath = new Path(storeMetadata.head.stateSchemaFilePath.get)
+            val storeMetadataEntry = storeMetadata.head
+            val operatorProperties = TransformWithStateOperatorProperties.fromJson(
+              storeMetadataEntry.operatorPropertiesJson)
+            val stateVarInfoList = operatorProperties.stateVariables
+              .filter(stateVar => stateVar.stateName == stateVarName)
+            require(stateVarInfoList.size == 1)
+            val stateVarInfo = stateVarInfoList.head
+            if (stateVarInfo.stateVariableType == StateVariableType.ValueState) {
+              stateVarType = StateVarType.valueType
+            } else if (stateVarInfo.stateVariableType == StateVariableType.ListState) {
+              stateVarType = StateVarType.listType
+            } else if (stateVarInfo.stateVariableType == StateVariableType.MapState) {
+              stateVarType = StateVarType.mapType
+            }
+
+            val schemaFilePath = new Path(storeMetadataEntry.stateSchemaFilePath.get)
             Some(schemaFilePath)
           } else {
             None
@@ -208,13 +229,12 @@ class StateDataSource extends TableProvider with DataSourceRegister with Logging
           val manager = new StateSchemaCompatibilityChecker(providerId, hadoopConf,
             oldSchemaFilePath = oldSchemaFilePath)
           val stateSchema = manager.readSchemaFile()
-          val stateVarName = sourceOptions.stateVarName
-            .getOrElse(StateStore.DEFAULT_COL_FAMILY_NAME)
 
           // Based on the version and read schema, populate the keyStateEncoderSpec used for
           // reading the column families
           val resultSchema = stateSchema.filter(_.colFamilyName == stateVarName).head
           keyStateEncoderSpecOpt = Some(getKeyStateEncoderSpec(resultSchema))
+          userKeySchema = resultSchema.userKeyEncoderSchema
 
           (resultSchema.keySchema, resultSchema.valueSchema)
       }
@@ -226,13 +246,29 @@ class StateDataSource extends TableProvider with DataSourceRegister with Logging
           .add("key", keySchema)
           .add("value", valueSchema)
           .add("partition_id", IntegerType)
+      } else if (stateVarType == StateVarType.valueType) {
+        new StructType()
+          .add("key", keySchema)
+          .add("value", valueSchema)
+          .add("partition_id", IntegerType)
+      } else if (stateVarType == StateVarType.listType) {
+        new StructType()
+          .add("key", keySchema)
+          .add("value", valueSchema)
+          .add("value_list", ArrayType(valueSchema))
+          .add("partition_id", IntegerType)
+      } else if (stateVarType == StateVarType.mapType) {
+        new StructType()
+          .add("key", keySchema)
+          .add("value", valueSchema)
+          .add("value_map", MapType(userKeySchema.get, valueSchema))
+          .add("partition_id", IntegerType)
       } else {
         new StructType()
           .add("key", keySchema)
           .add("value", valueSchema)
           .add("partition_id", IntegerType)
       }
-
     } catch {
       case NonFatal(e) =>
         throw StateDataSourceErrors.failedToReadStateSchema(sourceOptions, e)
@@ -313,6 +349,11 @@ object StateSourceOptions extends DataSourceOptions with Logging {
   object JoinSideValues extends Enumeration {
     type JoinSideValues = Value
     val left, right, none = Value
+  }
+
+  object StateVarType extends Enumeration {
+    type StateVarType = Value
+    val valueType, listType, mapType, none = Value
   }
 
   def apply(

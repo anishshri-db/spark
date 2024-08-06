@@ -25,6 +25,7 @@ import org.apache.hadoop.fs.{Path, PathFilter}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.read.{Batch, InputPartition, PartitionReaderFactory, Scan, ScanBuilder}
 import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.JoinSideValues
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.StateVarType.StateVarType
 import org.apache.spark.sql.execution.streaming.StreamingSymmetricHashJoinHelper.{LeftSide, RightSide}
 import org.apache.spark.sql.execution.streaming.state.{KeyStateEncoderSpec, StateStore, StateStoreConf, StateStoreErrors}
 import org.apache.spark.sql.types.StructType
@@ -36,9 +37,10 @@ class StateScanBuilder(
     schema: StructType,
     sourceOptions: StateSourceOptions,
     stateStoreConf: StateStoreConf,
-    keyStateEncoderSpec: KeyStateEncoderSpec) extends ScanBuilder {
+    keyStateEncoderSpec: KeyStateEncoderSpec,
+    stateVarType: StateVarType) extends ScanBuilder {
   override def build(): Scan = new StateScan(session, schema, sourceOptions, stateStoreConf,
-    keyStateEncoderSpec)
+    keyStateEncoderSpec, stateVarType)
 }
 
 /** An implementation of [[InputPartition]] for State Store data source. */
@@ -53,7 +55,8 @@ class StateScan(
     schema: StructType,
     sourceOptions: StateSourceOptions,
     stateStoreConf: StateStoreConf,
-    keyStateEncoderSpec: KeyStateEncoderSpec) extends Scan with Batch {
+    keyStateEncoderSpec: KeyStateEncoderSpec,
+    stateVarType: StateVarType) extends Scan with Batch {
 
   // A Hadoop Configuration can be about 10 KB, which is pretty big, so broadcast it
   private val hadoopConfBroadcast = session.sparkContext.broadcast(
@@ -123,7 +126,8 @@ class StateScan(
     case JoinSideValues.none =>
       new StatePartitionReaderFactory(stateStoreConf, hadoopConfBroadcast.value, schema,
         keyStateEncoderSpec,
-        sourceOptions.stateVarName.getOrElse(StateStore.DEFAULT_COL_FAMILY_NAME))
+        sourceOptions.stateVarName.getOrElse(StateStore.DEFAULT_COL_FAMILY_NAME),
+        stateVarType)
   }
 
   override def toBatch: Batch = this

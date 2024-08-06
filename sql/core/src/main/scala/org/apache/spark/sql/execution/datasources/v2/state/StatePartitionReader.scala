@@ -17,9 +17,14 @@
 package org.apache.spark.sql.execution.datasources.v2.state
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.sql.Encoders
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.encoders.{encoderFor, ExpressionEncoder}
 import org.apache.spark.sql.catalyst.expressions.{GenericInternalRow, UnsafeRow}
+import org.apache.spark.sql.catalyst.util.GenericArrayData
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.StateVarType
+import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions.StateVarType.StateVarType
 import org.apache.spark.sql.execution.datasources.v2.state.utils.SchemaUtil
 import org.apache.spark.sql.execution.streaming.state._
 import org.apache.spark.sql.execution.streaming.state.RecordType.{getRecordTypeAsString, RecordType}
@@ -36,16 +41,19 @@ class StatePartitionReaderFactory(
     hadoopConf: SerializableConfiguration,
     schema: StructType,
     keyStateEncoderSpec: KeyStateEncoderSpec,
-    stateVarName: String) extends PartitionReaderFactory {
+    stateVarName: String,
+    stateVarType: StateVarType) extends PartitionReaderFactory {
 
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
     val stateStoreInputPartition = partition.asInstanceOf[StateStoreInputPartition]
     if (stateStoreInputPartition.sourceOptions.readChangeFeed) {
       new StateStoreChangeDataPartitionReader(storeConf, hadoopConf,
-        stateStoreInputPartition, schema, keyStateEncoderSpec, stateVarName)
+        stateStoreInputPartition, schema, keyStateEncoderSpec, stateVarName,
+        stateVarType)
     } else {
       new StatePartitionReader(storeConf, hadoopConf,
-        stateStoreInputPartition, schema, keyStateEncoderSpec, stateVarName)
+        stateStoreInputPartition, schema, keyStateEncoderSpec, stateVarName,
+        stateVarType)
     }
   }
 }
@@ -60,7 +68,8 @@ abstract class StatePartitionReaderBase(
     partition: StateStoreInputPartition,
     schema: StructType,
     keyStateEncoderSpec: KeyStateEncoderSpec,
-    stateVarName: String)
+    stateVarName: String,
+    stateVarType: StateVarType)
   extends PartitionReader[InternalRow] with Logging {
   protected val keySchema = SchemaUtil.getSchemaAsDataType(
     schema, "key").asInstanceOf[StructType]
@@ -78,15 +87,21 @@ abstract class StatePartitionReaderBase(
       false
     }
 
+    val useMultipleValuesPerKey = if (stateVarType == StateVarType.listType) {
+      true
+    } else {
+      false
+    }
+
     val provider = StateStoreProvider.createAndInit(
       stateStoreProviderId, keySchema, valueSchema, keyStateEncoderSpec,
       useColumnFamilies = useColFamilies, storeConf, hadoopConf.value,
-      useMultipleValuesPerKey = false)
+      useMultipleValuesPerKey = useMultipleValuesPerKey)
 
     if (useColFamilies) {
       val store = provider.getStore(partition.sourceOptions.batchId + 1)
       store.createColFamilyIfAbsent(stateVarName, keySchema, valueSchema, keyStateEncoderSpec,
-        useMultipleValuesPerKey = false)
+        useMultipleValuesPerKey = useMultipleValuesPerKey)
     }
     provider
   }
@@ -123,9 +138,10 @@ class StatePartitionReader(
     partition: StateStoreInputPartition,
     schema: StructType,
     keyStateEncoderSpec: KeyStateEncoderSpec,
-    stateVarName: String)
+    stateVarName: String,
+    stateVarType: StateVarType)
   extends StatePartitionReaderBase(storeConf, hadoopConf, partition, schema,
-    keyStateEncoderSpec, stateVarName) {
+    keyStateEncoderSpec, stateVarName, stateVarType) {
 
   private lazy val store: ReadStateStore = {
     partition.sourceOptions.fromSnapshotOptions match {
@@ -144,12 +160,83 @@ class StatePartitionReader(
   }
 
   override lazy val iter: Iterator[InternalRow] = {
-    store.iterator(stateVarName).map(pair => unifyStateRowPair((pair.key, pair.value)))
+    if (stateVarType == StateVarType.listType) {
+      logWarning(s"TEST: received value schema as $valueSchema")
+      val encoderNew = ExpressionEncoder.apply(valueSchema)
+      val encoder = Encoders.STRING
+      val valExprEnc = encoderFor(encoder)
+      val objDeserializer = encoderNew.resolveAndBind().createDeserializer()
+      val pairIter = store.iterator(stateVarName)
+      pairIter.map { pair =>
+        val key = pair.key
+        val result = store.valuesIterator(key, stateVarName)
+
+/*        result.foreach { entry =>
+          val res: String = objDeserializer.apply(entry)
+          logWarning(s"TEST: received value=$res")
+        } */
+
+        var unsafeRowArr: Seq[UnsafeRow] = Seq.empty
+
+        result.foreach { entry =>
+          unsafeRowArr = unsafeRowArr :+ entry.copy()
+        }
+
+/*        var idx = 0
+        var op: Seq[Any] = Seq.empty
+        while (result.hasNext) {
+          logWarning(s"TEST: entering here")
+          val entry = result.next()
+          op = op :+ objDeserializer.apply(entry)
+//          arrData.update(idx, entry)
+          idx = idx + 1
+//          val res: String = objDeserializer.apply(entry)
+  //        logWarning(s"TESTRES: received value=$res")
+        } */
+
+        val arrData = new GenericArrayData(unsafeRowArr.toArray)
+        logWarning(s"TEST: size of arr data=${arrData.numElements()}")
+//        val genRowWithSchema = new GenericRowWithSchema(op.toArray, valueSchema)
+
+ //       val checkArr = arrData.toArray(IntegerType)
+ //       logWarning(s"TEST: converted array=$checkArr")
+
+/*        arrData.array.foreach { entry =>
+          val res: String = objDeserializer.apply(entry.asInstanceOf[UnsafeRow])
+          logWarning(s"TEST: received value=$res")
+        } */
+
+/*        val arrData = new GenericArrayData(result.size)
+        result.zipWithIndex.foreach { case (entry, index) =>
+     //     val procEntry = objDeserializer.apply(entry)
+     //     val entryStr = procEntry.asInstanceOf[String]
+       //   logWarning(s"TEST: received entryStr=$entryStr")
+          arrData.update(index, entry.getBaseObject)
+        } */
+/*        val arrData = new Array[Any](result.size)
+        result.zipWithIndex.foreach { case (entry, index) =>
+          arrData.update(index, entry)
+        } */
+        unifyStateRowPairWithMultValues((pair.key, arrData))
+      }
+    } else {
+      store.iterator(stateVarName).map(pair => unifyStateRowPair((pair.key, pair.value)))
+    }
   }
 
   override def close(): Unit = {
     store.abort()
     super.close()
+  }
+
+  private def unifyStateRowPairWithMultValues(pair: (UnsafeRow,
+    GenericArrayData)): InternalRow = {
+    val row = new GenericInternalRow(4)
+    row.update(0, pair._1)
+    row.setNullAt(1)
+    row.update(2, pair._2)
+    row.update(3, partition.partition)
+    row
   }
 
   private def unifyStateRowPair(pair: (UnsafeRow, UnsafeRow)): InternalRow = {
@@ -171,9 +258,10 @@ class StateStoreChangeDataPartitionReader(
     partition: StateStoreInputPartition,
     schema: StructType,
     keyStateEncoderSpec: KeyStateEncoderSpec,
-    stateVarName: String)
+    stateVarName: String,
+    stateVarType: StateVarType)
   extends StatePartitionReaderBase(storeConf, hadoopConf, partition, schema,
-    keyStateEncoderSpec, stateVarName) {
+    keyStateEncoderSpec, stateVarName, stateVarType) {
 
   private lazy val changeDataReader:
     NextIterator[(RecordType.Value, UnsafeRow, UnsafeRow, Long)] = {
